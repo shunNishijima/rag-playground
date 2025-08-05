@@ -7,6 +7,7 @@ langchain
 langchain-openai
 langchain-community
 langchain-core
+langchain_huggingface
 
 # HuggingFace 関連
 transformers
