@@ -13,7 +13,8 @@ from langchain_community.vectorstores import FAISS
 # ========== 設定読み込み ========== #
 load_dotenv()
 
-FAISS_DB_DIR = os.getenv("FAISS_DB_DIR", "./vectorstore")
+base_dir = Path(__file__).resolve().parent.parent  # src/backend から2つ上に戻る
+vector_store_path = base_dir / os.getenv("FAISS_DB_DIR")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 # ========== ログ設定 ========== #
