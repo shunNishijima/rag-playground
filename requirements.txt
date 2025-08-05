@@ -2,3 +2,9 @@ streamlit
 torch==2.7.1
 transformers
 sentence-transformers
+python-dotenv
+python-docx
+tqdm
+langchain-core
+langchain-community
+langchain-openai
