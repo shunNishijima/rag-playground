@@ -1,10 +1,29 @@
+
+# Streamlit 本体
 streamlit
-torch==2.7.1
+
+# LangChain 関連
+langchain
+langchain-openai
+langchain-community
+langchain-core
+
+# HuggingFace 関連
 transformers
 sentence-transformers
+torch==2.7.1
+accelerate  # GPU系で必要になる場合あり
+
+# ベクトルDB
+faiss-cpu
+
+# LLM 評価や補助
+tiktoken
+pydantic
+
+# .env 読み込み
 python-dotenv
 python-docx
+
+# その他
 tqdm
-langchain-core
-langchain-community
-langchain-openai
