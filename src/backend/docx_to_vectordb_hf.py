@@ -17,7 +17,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 # ============================
 # 切り替え可能な埋め込みモデル
 # ============================
-USE_OPENAI = True  # ← OpenAI Embedding を使うかどうか
+USE_OPENAI = False  # ← OpenAI Embedding を使うかどうか
 
 if USE_OPENAI:
     from langchain_openai import OpenAIEmbeddings
@@ -38,8 +38,10 @@ else:
 # ============================
 DOCX_DIR = Path("data/docx")
 TXT_DIR = Path("data/all")
-FAISS_DB_DIR = Path("vectorstore")
-
+if USE_OPENAI:
+    FAISS_DB_DIR = Path("vectorstore")
+else:
+    FAISS_DB_DIR = Path("vectorstore_hf")
 # ============================
 # DOCX → TXT 変換関数
 # ============================

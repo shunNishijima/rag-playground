@@ -2,14 +2,14 @@ import os
 import logging
 from typing import Union, List, Dict, Any
 from pathlib import Path
-
+import traceback
 import torch
 from dotenv import load_dotenv
 
 from langchain.chains import RetrievalQA
 from langchain_core.documents import Document
 from langchain_community.vectorstores import FAISS
-
+from langchain_huggingface import HuggingFaceEmbeddings
 try:
     import streamlit as st
     secrets = st.secrets
@@ -21,12 +21,18 @@ except ModuleNotFoundError:
 load_dotenv()
 
 def get_secret(key, default=None):
-    return os.getenv(key) or st.secrets.get(key, default)
+    if "st" in globals() and hasattr(st, "secrets"):
+        return os.getenv(key) or st.secrets.get(key, default)
+    return os.getenv(key, default)
+
 
 OPENAI_API_KEY = get_secret("OPENAI_API_KEY")
-base_dir = Path(__file__).resolve().parent.parent
-FAISS_DB_DIR = get_secret("FAISS_DB_DIR", "vectorstore")
-vector_store_path = base_dir / FAISS_DB_DIR
+base_dir = Path(__file__).resolve().parents[2]  # frontend → src → project root
+def get_vector_store_path(use_openai: bool) -> Path:
+    """use_openaiに応じてベクトルストアのパスを切り替える"""
+    store_dir_name = "vectorstore" if use_openai else "vectorstore_hf"
+    return base_dir / store_dir_name
+
 
 # ========== ログ設定 ========== #
 logging.basicConfig(
@@ -63,22 +69,28 @@ def get_llm(use_openai: bool):
         return ChatOpenAI(model="gpt-4o", temperature=0, openai_api_key=OPENAI_API_KEY)
     else:
         from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
-        from langchain_community.llms import HuggingFacePipeline
+        from langchain_huggingface import HuggingFacePipeline  # ✅ 修正ポイント
 
         logging.info(f"🤖 HuggingFace LLM（{llm_model_name}）をロード中...")
         tokenizer = AutoTokenizer.from_pretrained(llm_model_name)
-        model = AutoModelForCausalLM.from_pretrained(llm_model_name).to(device)
+        model = AutoModelForCausalLM.from_pretrained(
+            llm_model_name,
+            device_map="auto",
+            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32
+        )
 
         pipe = pipeline(
             "text-generation",
             model=model,
             tokenizer=tokenizer,
-            device=0 if device == "cuda" else -1,
+            return_full_text=False,
             max_new_tokens=512,
             do_sample=False
         )
+
         logging.info("✅ HuggingFace LLM のロード完了")
         return HuggingFacePipeline(pipeline=pipe)
+
 
 # ========== チェーン生成 ========== #
 def get_retrieval_chain(llm, vectorstore: FAISS) -> RetrievalQA:
@@ -95,14 +107,27 @@ def rag_chatbot(
     use_openai: bool = False
 ) -> Dict[str, Union[str, List[Dict[str, Any]]]]:
 
+    # ✅ vectorstoreパスを use_openai に応じて自動切り替え
     if vector_store_path is None:
-        vector_store_path = FAISS_DB_DIR
+        vector_store_path = get_vector_store_path(use_openai)
+    else:
+        vector_store_path = Path(vector_store_path)
 
-    # ベクトルDBの存在確認
-    if not (Path(vector_store_path) / "index.faiss").exists():
-        raise FileNotFoundError(f"❌ index.faiss が見つかりません: {vector_store_path}")
-    if not (Path(vector_store_path) / "index.pkl").exists():
-        raise FileNotFoundError(f"❌ index.pkl が見つかりません: {vector_store_path}")
+
+    # ✅ パスが存在しなければ詳細エラー表示
+    index_faiss = vector_store_path / "index.faiss"
+    index_pkl = vector_store_path / "index.pkl"
+
+    if not index_faiss.exists():
+        raise FileNotFoundError(
+            f"❌ index.faiss が見つかりません: {index_faiss}\n"
+            f"🛠️ 対応策: vectorstore構築スクリプトを実行してください。"
+        )
+    if not index_pkl.exists():
+        raise FileNotFoundError(
+            f"❌ index.pkl が見つかりません: {index_pkl}\n"
+            f"🛠️ 対応策: vectorstore構築スクリプトを実行してください。"
+        )
 
     # モデルロード
     embedding_model = get_embedding_model(use_openai)
@@ -122,13 +147,12 @@ def rag_chatbot(
     try:
         result = retrieval_chain.invoke({"query": input_text})
     except Exception as e:
-        logging.error("❌ 回答生成中にエラー: %s", str(e))
+        logging.error("❌ 回答生成中にエラー:\n%s", traceback.format_exc())
         return {
             "answer": "⚠️ 回答生成中にエラーが発生しました。",
             "source_documents": []
         }
 
-    # 出力整形
     logging.info("✅ 回答生成完了")
     return {
         "answer": result["result"],

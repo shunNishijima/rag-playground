@@ -1,6 +1,6 @@
-
 # Streamlit 本体
 streamlit
+pyyaml
 
 # LangChain 関連
 langchain
@@ -8,12 +8,14 @@ langchain-openai
 langchain-community
 langchain-core
 langchain_huggingface
+pydantic-settings>=2.0
 
 # HuggingFace 関連
 transformers
 sentence-transformers
 torch==2.7.1
-accelerate  # GPU系で必要になる場合あり
+accelerate
+safetensors
 
 # ベクトルDB
 faiss-cpu
@@ -24,6 +26,8 @@ pydantic
 
 # .env 読み込み
 python-dotenv
+
+# 文書処理
 python-docx
 
 # その他
