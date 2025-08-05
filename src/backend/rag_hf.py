@@ -10,13 +10,23 @@ from langchain.chains import RetrievalQA
 from langchain_core.documents import Document
 from langchain_community.vectorstores import FAISS
 
+try:
+    import streamlit as st
+    secrets = st.secrets
+except ModuleNotFoundError:
+    secrets = {}
+
+
 # ========== 設定読み込み ========== #
 load_dotenv()
 
+def get_secret(key, default=None):
+    return os.getenv(key) or st.secrets.get(key, default)
+
+OPENAI_API_KEY = get_secret("OPENAI_API_KEY")
 base_dir = Path(__file__).resolve().parent.parent
-FAISS_DB_DIR = os.getenv("FAISS_DB_DIR", "vectorstore")
+FAISS_DB_DIR = get_secret("FAISS_DB_DIR", "vectorstore")
 vector_store_path = base_dir / FAISS_DB_DIR
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 # ========== ログ設定 ========== #
 logging.basicConfig(
