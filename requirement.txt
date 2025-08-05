@@ -1,5 +1,5 @@
-streamlit
+-f https://download.pytorch.org/whl/torch_stable.html
 torch==2.2.0+cpu
+streamlit
 transformers
 sentence-transformers
--f https://download.pytorch.org/whl/torch_stable.html
