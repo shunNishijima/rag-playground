@@ -18,6 +18,8 @@ from backend.rag_hf import (
     get_embedding_model
 )
 
+from langchain_community.vectorstores import FAISS
+
 # ========== ログファイル定義 ========== #
 LOG_FILE = pathlib.Path("logs/ragas_eval_log.jsonl")
 LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
