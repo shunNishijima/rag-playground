@@ -43,6 +43,7 @@ cache/
 # Streamlit cache
 .streamlit/
 .db/
+.streamlit/secrets.toml
 
 # Python dependency files (editable installs etc.)
 *.egg-info/
