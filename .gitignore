@@ -1,0 +1,60 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+.venv/
+env/
+venv/
+ENV/
+
+# Environment variables and secrets
+.env
+*.env
+secrets.toml
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Logs
+*.log
+logs/
+*.jsonl
+
+# VSCode settings
+.vscode/
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# FAISS index files
+**/index.faiss
+**/index.pkl
+
+# HuggingFace model cache
+~/.cache/huggingface
+~/.huggingface/
+cache/
+*.ckpt
+*.bin
+
+# Streamlit cache
+.streamlit/
+.db/
+
+# Python dependency files (editable installs etc.)
+*.egg-info/
+dist/
+build/
+
+# Lint/mypy/misc
+.mypy_cache/
+.pytest_cache/
+coverage.*
+htmlcov/
+
+# RAG用中間ファイルなど（必要に応じて）
+data/temp/
+data/output/
