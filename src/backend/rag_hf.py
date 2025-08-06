@@ -165,11 +165,57 @@ def rag_chatbot(
         ]
     }
 
+# ========== RAG チャットストリーミング関数 ========== #
+def rag_chatbot_stream(
+    input_text: str,
+    vector_store_path: str = None,
+    use_openai: bool = False
+):
+    from transformers import TextStreamer
+    from contextlib import redirect_stdout
+    import io
+
+    if vector_store_path is None:
+        vector_store_path = get_vector_store_path(use_openai)
+    else:
+        vector_store_path = Path(vector_store_path)
+
+    index_faiss = vector_store_path / "index.faiss"
+    index_pkl = vector_store_path / "index.pkl"
+    if not index_faiss.exists() or not index_pkl.exists():
+        yield "⚠️ vectorstore が存在しません。"
+        return
+
+    embedding_model = get_embedding_model(use_openai)
+    llm = get_llm(use_openai)
+    faiss_db = FAISS.load_local(vector_store_path, embedding_model, allow_dangerous_deserialization=True)
+    retriever = faiss_db.as_retriever(search_kwargs={"k": 3})
+
+    docs = retriever.get_relevant_documents(input_text)
+    context = "\n\n".join([doc.page_content for doc in docs])
+    prompt = f"以下の文書を参考に、質問に答えてください。\n\n文書:\n{context}\n\n質問: {input_text}"
+
+    tokenizer = llm.pipeline.tokenizer
+    model = llm.pipeline.model
+    streamer = TextStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
+
+    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+    generation_kwargs = dict(**inputs, max_new_tokens=512, do_sample=False, streamer=streamer)
+
+    buffer = io.StringIO()
+    with redirect_stdout(buffer):
+        model.generate(**generation_kwargs)
+
+    for char in buffer.getvalue():
+        yield char
+
+    yield "[END]"  # 終了マーク
+
 
 # ========== CLI 実行 ========== #
 if __name__ == "__main__":
     query = "不法行為による損害賠償とは？"
-    result = rag_chatbot(query, use_openai=True)
+    result = rag_chatbot(query, use_openai=False)
     print("💬 回答:\n", result["answer"])
     print("📚 参照文書:")
     for i, doc in enumerate(result["source_documents"], 1):

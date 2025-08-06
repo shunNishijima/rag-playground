@@ -11,7 +11,12 @@ import streamlit as st
 # プロジェクトルートの `src` ディレクトリをパスに追加
 sys.path.append(str(pathlib.Path(__file__).resolve().parent.parent))
 
-from backend.rag_hf import rag_chatbot
+from backend.rag_hf import (
+    rag_chatbot,
+    rag_chatbot_stream,
+    get_vector_store_path,
+    get_embedding_model
+)
 
 # ========== ログファイル定義 ========== #
 LOG_FILE = pathlib.Path("logs/ragas_eval_log.jsonl")
@@ -67,36 +72,80 @@ def render():
         st.chat_message("user").markdown(prompt)
         st.session_state.messages.append({"role": "user", "content": prompt})
 
+        # with st.chat_message("assistant"):
+        #     with st.spinner("回答を生成中..."):
+        #         response = rag_chatbot(prompt, use_openai=use_openai)
+        #         result = response["answer"]
+        #         source_documents = response["source_documents"]
+
+        #     # 🔽 参照回答（reference）取得
+        #     reference = reference_dict.get(prompt, "（模範解答が見つかりません）")
+
+        #     # 🔽 RAGAS ログ記録
+        #     log_ragas_sample(prompt, response, reference)
+
+        #     # ソース整形
+        #     details_message = ""
+        #     if source_documents:
+        #         details_message += "<br><span style='font-size: small; color: gray;'>\n参考文書:</span><ul>"
+        #         for doc in source_documents:
+        #             metadata = doc.get("metadata", {})
+        #             source_path = metadata.get("source") or metadata.get("id") or "不明"
+        #             title = pathlib.Path(source_path).name
+        #             details_message += f"<li><b>{title}</b></li>"
+        #         details_message += "</ul>"
+        #     else:
+        #         details_message += "<span style='font-size: small; color: gray;'>参考資料はありません。</span>"
+
+        #     # 回答表示
+        #     answer = f"{result}<br><br><b>📑 模範解答:</b> {reference}<br>{details_message}"
+        #     st.markdown(answer, unsafe_allow_html=True)
+        #     st.session_state.messages.append({"role": "assistant", "content": answer})
+        #     st.rerun()
+            
         with st.chat_message("assistant"):
             with st.spinner("回答を生成中..."):
-                response = rag_chatbot(prompt, use_openai=use_openai)
-                result = response["answer"]
-                source_documents = response["source_documents"]
 
-            # 🔽 参照回答（reference）取得
-            reference = reference_dict.get(prompt, "（模範解答が見つかりません）")
+                # ✅ relevant documents を先に取得
+                vector_store_path = get_vector_store_path(use_openai)
+                embedding_model = get_embedding_model(use_openai)
+                faiss_db = FAISS.load_local(vector_store_path, embedding_model, allow_dangerous_deserialization=True)
+                retriever = faiss_db.as_retriever(search_kwargs={"k": 3})
+                docs = retriever.get_relevant_documents(prompt)
 
-            # 🔽 RAGAS ログ記録
-            log_ragas_sample(prompt, response, reference)
+                # ✅ ストリーミング出力
+                response_text = ""
+                response_area = st.empty()
+                for chunk in rag_chatbot_stream(prompt, use_openai=use_openai):
+                    if chunk == "[END]":
+                        break
+                    response_text += chunk
+                    response_area.markdown(response_text)
 
-            # ソース整形
-            details_message = ""
-            if source_documents:
-                details_message += "<br><span style='font-size: small; color: gray;'>\n参考文書:</span><ul>"
-                for doc in source_documents:
-                    metadata = doc.get("metadata", {})
+                # 🔽 参照回答
+                reference = reference_dict.get(prompt, "（模範解答が見つかりません）")
+
+                # 🔽 RAGAS ログ記録
+                log_ragas_sample(prompt, {
+                    "answer": response_text,
+                    "source_documents": [
+                        {"page_content": doc.page_content, "metadata": doc.metadata} for doc in docs
+                    ]
+                }, reference)
+
+                # 🔽 ソース整形
+                details_message = "<br><span style='font-size: small; color: gray;'>\n参考文書:</span><ul>"
+                for doc in docs:
+                    metadata = doc.metadata
                     source_path = metadata.get("source") or metadata.get("id") or "不明"
                     title = pathlib.Path(source_path).name
                     details_message += f"<li><b>{title}</b></li>"
                 details_message += "</ul>"
-            else:
-                details_message += "<span style='font-size: small; color: gray;'>参考資料はありません。</span>"
 
-            # 回答表示
-            answer = f"{result}<br><br><b>📑 模範解答:</b> {reference}<br>{details_message}"
-            st.markdown(answer, unsafe_allow_html=True)
-            st.session_state.messages.append({"role": "assistant", "content": answer})
-            st.rerun()
+                # 🔽 最終回答整形して記録
+                answer = f"{response_text}<br><br><b>📑 模範解答:</b> {reference}<br>{details_message}"
+                st.session_state.messages.append({"role": "assistant", "content": answer})
+                st.rerun()
 
 # ========== 実行 ========== #
 if __name__ == "__main__":
