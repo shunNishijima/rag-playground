@@ -135,14 +135,18 @@ def render():
                     ]
                 }, reference)
 
-                # 🔽 ソース整形
+                # 🔽 ソース整形（重複排除あり）
                 details_message = "<br><span style='font-size: small; color: gray;'>\n参考文書:</span><ul>"
+                unique_titles = set()
                 for doc in docs:
                     metadata = doc.metadata
                     source_path = metadata.get("source") or metadata.get("id") or "不明"
                     title = pathlib.Path(source_path).name
-                    details_message += f"<li><b>{title}</b></li>"
+                    if title not in unique_titles:
+                        unique_titles.add(title)
+                        details_message += f"<li><b>{title}</b></li>"
                 details_message += "</ul>"
+
 
                 # 🔽 最終回答整形して記録
                 answer = f"{response_text}<br><br><b>📑 模範解答:</b> {reference}<br>{details_message}"

@@ -166,15 +166,11 @@ def rag_chatbot(
     }
 
 # ========== RAG チャットストリーミング関数 ========== #
-def rag_chatbot_stream(
-    input_text: str,
-    vector_store_path: str = None,
-    use_openai: bool = False
-):
-    from transformers import TextStreamer
-    from contextlib import redirect_stdout
-    import io
+def rag_chatbot_stream(input_text: str, vector_store_path: str = None, use_openai: bool = False):
+    from langchain_core.prompts import PromptTemplate
+    from langchain_core.runnables import RunnableMap
 
+    # パス設定
     if vector_store_path is None:
         vector_store_path = get_vector_store_path(use_openai)
     else:
@@ -186,40 +182,89 @@ def rag_chatbot_stream(
         yield "⚠️ vectorstore が存在しません。"
         return
 
+    # ベクトルストア読み込み
     embedding_model = get_embedding_model(use_openai)
     llm = get_llm(use_openai)
     faiss_db = FAISS.load_local(vector_store_path, embedding_model, allow_dangerous_deserialization=True)
     retriever = faiss_db.as_retriever(search_kwargs={"k": 3})
 
-    docs = retriever.get_relevant_documents(input_text)
-    context = "\n\n".join([doc.page_content for doc in docs])
-    prompt = f"以下の文書を参考に、質問に答えてください。\n\n文書:\n{context}\n\n質問: {input_text}"
+    try:
+        if use_openai:
+            # ✅ OpenAI LLM（Streaming対応）
+            from langchain_openai import ChatOpenAI
+            from langchain_core.messages import HumanMessage
 
-    tokenizer = llm.pipeline.tokenizer
-    model = llm.pipeline.model
-    streamer = TextStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
+            docs = retriever.invoke(input_text)
+            context = "\n\n".join([doc.page_content for doc in docs])
+            prompt = f"""以下の文書を参考に、質問に答えてください。
 
-    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-    generation_kwargs = dict(**inputs, max_new_tokens=512, do_sample=False, streamer=streamer)
+            文書:
+            {context}
 
-    buffer = io.StringIO()
-    with redirect_stdout(buffer):
-        model.generate(**generation_kwargs)
+            質問: {input_text}
+            """
 
-    for char in buffer.getvalue():
-        yield char
+            # ChatOpenAIはstream=Trueに設定
+            stream_llm = ChatOpenAI(
+                model="gpt-4o",
+                temperature=0,
+                streaming=True,
+                openai_api_key=OPENAI_API_KEY
+            )
 
-    yield "[END]"  # 終了マーク
+            # 🔽 HumanMessage をリストにするのが重要！
+            for chunk in stream_llm.stream([HumanMessage(content=prompt)]):
+                yield chunk.content
+
+            yield "\n\n[END]"
+
+        else:
+            # ✅ HuggingFace LLM（Streaming対応）
+            from transformers import TextStreamer
+            tokenizer = llm.pipeline.tokenizer
+            model = llm.pipeline.model
+
+            docs = retriever.invoke(input_text)
+            context = "\n\n".join([doc.page_content for doc in docs])
+            prompt = f"""以下の文書を参考に、質問に答えてください。
+
+文書:
+{context}
+
+質問: {input_text}
+"""
+
+            inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+            streamer = TextStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
+
+            import io
+            from contextlib import redirect_stdout
+            buffer = io.StringIO()
+            with redirect_stdout(buffer):
+                model.generate(**inputs, max_new_tokens=512, streamer=streamer)
+
+            # 文字単位でストリーミング出力
+            for char in buffer.getvalue():
+                yield char
+            yield "\n\n[END]"
+
+    except Exception as e:
+        logging.error("❌ ストリーミング生成中にエラー:\n%s", traceback.format_exc())
+        yield f"⚠️ エラーが発生しました: {e}"
 
 
 # ========== CLI 実行 ========== #
-if __name__ == "__main__":
-    query = "不法行為による損害賠償とは？"
-    result = rag_chatbot(query, use_openai=False)
-    print("💬 回答:\n", result["answer"])
-    print("📚 参照文書:")
-    for i, doc in enumerate(result["source_documents"], 1):
-        metadata = doc.get("metadata", {})
-        print(f"{i}. {metadata.get('source', 'No Source')}")
-        print(doc["page_content"][:200], "...\n")
+# if __name__ == "__main__":
+#     query = "取締役等に関する規律の見直しについてどのようなものがあったか教えてください。"
+#     result = rag_chatbot(query, use_openai=True)
+#     print("💬 回答:\n", result["answer"])
+#     print("📚 参照文書:")
+#     for i, doc in enumerate(result["source_documents"], 1):
+#         metadata = doc.get("metadata", {})
+#         print(f"{i}. {metadata.get('source', 'No Source')}")
+#         print(doc["page_content"][:200], "...\n")
 
+if __name__ == "__main__":
+    query = "取締役等に関する規律の見直しについてどのようなものがあったか教えてください。"
+    for token in rag_chatbot_stream(query, use_openai=True):  # or False
+        print(token, end="", flush=True)
