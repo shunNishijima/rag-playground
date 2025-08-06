@@ -10,6 +10,7 @@ from tqdm import tqdm
 import fitz  # PyMuPDF
 from pdf2image import convert_from_path
 import pytesseract
+import re
 
 # ============================
 # .env 読み込み
@@ -20,7 +21,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 # ============================
 # 切り替え可能な埋め込みモデル
 # ============================
-USE_OPENAI = True  # ← OpenAI Embedding を使うかどうか
+USE_OPENAI = True  # ← 切り替え可能
 
 if USE_OPENAI:
     from langchain_openai import OpenAIEmbeddings
@@ -30,10 +31,12 @@ if USE_OPENAI:
         model="text-embedding-3-small",
         openai_api_key=OPENAI_API_KEY
     )
+    VECTOR_STORE_PATH = Path("vectorstore")
     print("🧠 OpenAI埋め込みモデルを使用します。")
 else:
     from langchain_community.embeddings import HuggingFaceEmbeddings
     embedding_model = HuggingFaceEmbeddings(model_name="intfloat/multilingual-e5-small")
+    VECTOR_STORE_PATH = Path("vectorstore_hf")
     print("🧠 HuggingFace埋め込みモデルを使用します。")
 
 # ============================
@@ -42,52 +45,107 @@ else:
 DOCX_DIR = Path("data/docx")
 PDF_DIR = Path("data/pdf")
 TXT_DIR = Path("data/all")
-if USE_OPENAI:
-    FAISS_DB_DIR = Path("vectorstore")
-else:
-    FAISS_DB_DIR = Path("vectorstore_hf")
-# ============================
-# DOCX → TXT 変換関数
-# ============================
-def convert_docx_directory(docx_dir: Path, txt_output_dir: Path):
-    txt_output_dir.mkdir(parents=True, exist_ok=True)
-    for docx_file in docx_dir.glob("*.docx"):
-        txt_file = txt_output_dir / f"{docx_file.stem}.txt"
-        if txt_file.exists():
-            print(f"⏭️ スキップ: {txt_file.name}")
-            continue
-        try:
-            doc = DocxDocument(docx_file)
-            text = "\n".join(p.text for p in doc.paragraphs if p.text.strip())
-            txt_file.write_text(text, encoding="utf-8")
-            print(f"✅ 変換: {docx_file.name}")
-        except Exception as e:
-            print(f"❌ エラー: {docx_file.name} - {e}")
 
 # ============================
-# PDF → TXT 変換関数
+# OCRあり or なしに関わらずPDF処理
 # ============================
-def convert_pdf_directory(pdf_dir: Path, txt_output_dir: Path, use_ocr=False):
-    txt_output_dir.mkdir(parents=True, exist_ok=True)
-    for pdf_file in pdf_dir.glob("*.pdf"):
-        txt_file = txt_output_dir / f"{pdf_file.stem}.txt"
-        if txt_file.exists():
-            print(f"⏭️ スキップ: {txt_file.name}")
-            continue
-        try:
-            if use_ocr:
-                text = extract_text_from_scanned_pdf(pdf_file)
-            else:
-                text = extract_text_from_pdf(pdf_file)
+def process_and_save_with_ocr():
+    documents = []
 
-            if text.strip():
-                txt_file.write_text(text, encoding="utf-8")
-                print(f"✅ 変換: {pdf_file.name}")
-        except Exception as e:
-            print(f"❌ PDF処理失敗: {pdf_file.name} - {e}")
+    for pdf_path in Path(PDF_DIR).glob("*.pdf"):
+        print(f"📄 PDF処理中: {pdf_path.name}")
 
+        # スタイル付き抽出（バツ印や赤文字優先）
+        pages = extract_text_with_styles(pdf_path)
+
+        # ページが空ならOCRへフォールバック
+        if all(not p.strip() for p in pages):
+            print(f"⚠️ スタイル抽出失敗: {pdf_path.name} → OCRに切り替え")
+            pages = extract_text_from_scanned_pdf(pdf_path)
+
+        # OCRでも空ならテキストPDFとして処理
+        if all(not p.strip() for p in pages):
+            print(f"⚠️ OCR失敗: {pdf_path.name} → テキスト型PDFとして処理します")
+            full_text = extract_text_from_pdf(pdf_path)
+            if not full_text.strip():
+                print(f"❌ PDFテキスト抽出も失敗: {pdf_path.name} → スキップ")
+                continue
+            metadata = {
+                "source": pdf_path.name,
+                "id": f"{pdf_path.stem}",
+                "page_number": 1,
+                "section": extract_section_title(full_text),
+            }
+            documents.append(LangchainDocument(page_content=full_text, metadata=metadata))
+        else:
+            for i, page_text in enumerate(pages):
+                if not page_text.strip():
+                    continue
+                metadata = {
+                    "source": pdf_path.name,
+                    "id": f"{pdf_path.stem}_p{i+1}",
+                    "page_number": i + 1,
+                    "section": extract_section_title(page_text),
+                }
+                documents.append(LangchainDocument(page_content=page_text, metadata=metadata))
+
+    if not documents:
+        print("❌ 文書が1つも生成できませんでした。")
+        return
+
+    print(f"🧱 チャンク分割中...（文書数: {len(documents)}）")
+    splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(chunk_size=512, chunk_overlap=128)
+    split_docs = splitter.split_documents(documents)
+    print(f"✅ 分割後チャンク数: {len(split_docs)}")
+
+    save_vector_store(split_docs, VECTOR_STORE_PATH)
+
+
+# ============================
+# スタイルを保持しながらOCR
+# ============================
+def extract_text_with_styles(pdf_path: Path) -> List[str]:
+    """PDFページごとに、色や装飾を判別しつつテキスト抽出"""
+    doc = fitz.open(str(pdf_path))
+    processed_pages = []
+
+    for page in doc:
+        page_text = ""
+        blocks = page.get_text("dict")["blocks"]
+        for b in blocks:
+            if "lines" not in b:
+                continue
+            for line in b["lines"]:
+                for span in line["spans"]:
+                    text = span["text"].strip()
+                    if not text:
+                        continue
+
+                    # 判別条件
+                    color = span.get("color", 0)
+                    is_strike = span.get("flags", 0) & 8 != 0  # 8 = strike-through
+
+                    # ❌ 打ち消し線の文字は無視
+                    if is_strike:
+                        continue
+
+                    # ✅ 色付き文字（赤・緑）のみ抽出（例：RGB値）
+                    if color in [0xFF0000, 0x00FF00]:  # 赤または緑
+                        page_text += f"{text} "
+
+                    # ⚪ 通常文字も抽出（優先度低）
+                    elif color == 0x000000:
+                        page_text += f"{text} "
+
+        processed_pages.append(page_text.strip())
+
+    return processed_pages
+
+
+# ============================
+# テキスト型PDF抽出
+# ============================
 def extract_text_from_pdf(pdf_path: Path) -> str:
-    """テキスト埋め込み型PDFから抽出"""
     try:
         doc = fitz.open(pdf_path)
         return "\n".join(page.get_text() for page in doc)
@@ -95,51 +153,39 @@ def extract_text_from_pdf(pdf_path: Path) -> str:
         print(f"❌ PDF読み取り失敗: {pdf_path.name} - {e}")
         return ""
 
-def extract_text_from_scanned_pdf(pdf_path: Path) -> str:
-    """OCRでスキャンPDFから抽出"""
+# ============================
+# OCRでページごとに抽出
+# ============================
+def extract_text_from_scanned_pdf(pdf_path: Path) -> List[str]:
     try:
         images = convert_from_path(str(pdf_path))
-        text = ""
-        for i, image in enumerate(images):
-            text += pytesseract.image_to_string(image, lang="jpn") + "\n"
-        return text
+        return [pytesseract.image_to_string(img, lang="jpn") for img in images]
     except Exception as e:
         print(f"❌ OCR失敗: {pdf_path.name} - {e}")
-        return ""
+        return []
+
+# ============================
+# 章タイトル抽出
+# ============================
+def extract_section_title(text: str) -> str:
+    """章タイトルらしきものを抽出"""
+    patterns = [
+        r"(第[0-9一二三四五六七八九十]+章\s*.+)",
+        r"^\s*[0-9]+\.\s+.+",  # 1. はじめに
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, re.MULTILINE)
+        if match:
+            try:
+                # グループが存在する場合のみ
+                return match.group(1).strip()
+            except IndexError:
+                return match.group(0).strip()
+    return "不明"
 
 
 # ============================
-# TXT → LangchainDocument 読み込み
-# ============================
-def load_txt_directory(txt_dir: Path) -> List[LangchainDocument]:
-    docs = []
-    for file in txt_dir.glob("*.txt"):
-        try:
-            text = file.read_text(encoding="utf-8")
-            if text.strip():
-                docs.append(LangchainDocument(
-                    page_content=text,
-                    metadata={
-                        "source": file.name,
-                        "id": file.stem  # これを追加
-                    }
-                ))
-                print(f"📄 ロード: {file.name}")
-        except Exception as e:
-            print(f"⚠️ 読み込み失敗: {file.name} - {e}")
-    return docs
-
-
-# ============================
-# チャンク分割（metadata付き）
-# ============================
-def split_documents(docs: List[LangchainDocument], chunk_size=1000, chunk_overlap=100) -> List[LangchainDocument]:
-    splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
-    chunked_docs = splitter.split_documents(docs)
-    return chunked_docs
-
-# ============================
-# ベクトル保存
+# FAISSベクトル保存
 # ============================
 def save_vector_store(docs: List[LangchainDocument], output_dir: Path, batch_size: int = 50):
     if not docs:
@@ -148,10 +194,10 @@ def save_vector_store(docs: List[LangchainDocument], output_dir: Path, batch_siz
 
     texts = [doc.page_content for doc in docs]
     metadatas = [doc.metadata for doc in docs]
-    print(f"🔢 ベクトル変換: {len(texts)}件, 最長: {max(len(t) for t in texts)}文字")
 
+    print(f"🧠 埋め込み開始: {len(texts)}件")
     embeddings = []
-    for i in tqdm(range(0, len(texts), batch_size), desc="🔄 埋め込み実行中"):
+    for i in tqdm(range(0, len(texts), batch_size), desc="🔄 ベクトル化中"):
         batch = texts[i:i + batch_size]
         try:
             batch_vectors = embedding_model.embed_documents(batch)
@@ -160,7 +206,7 @@ def save_vector_store(docs: List[LangchainDocument], output_dir: Path, batch_siz
             print(f"❌ 埋め込み失敗（{i}件目）: {e}")
 
     if not embeddings:
-        print("❌ ベクトルが空です。保存できません。")
+        print("❌ ベクトルが生成されませんでした。")
         return
 
     try:
@@ -171,30 +217,12 @@ def save_vector_store(docs: List[LangchainDocument], output_dir: Path, batch_siz
         )
         output_dir.mkdir(parents=True, exist_ok=True)
         faiss_db.save_local(str(output_dir))
-        print(f"✅ 保存完了: {output_dir.resolve()}")
+        print(f"✅ ベクトル保存完了: {output_dir.resolve()}")
     except Exception as e:
         print(f"❌ FAISS 保存失敗: {e}")
 
 # ============================
 # 実行フロー
 # ============================
-def process_and_save():
-    print(f"📂 DOCX → TXT 変換: {DOCX_DIR.resolve()}")
-    convert_docx_directory(DOCX_DIR, TXT_DIR)
-    
-    print(f"📂 PDF → TXT 変換: {PDF_DIR.resolve()}")
-    convert_pdf_directory(PDF_DIR, TXT_DIR, use_ocr=False)  # or True if OCRが必要
-
-    print(f"📁 TXT読込: {TXT_DIR.resolve()}")
-    docs = load_txt_directory(TXT_DIR)
-    print(f"✅ 文書数: {len(docs)}")
-
-    print("✂️ チャンク分割中...")
-    chunked_docs = split_documents(docs)
-    print(f"✅ チャンク数: {len(chunked_docs)}")
-
-    print("💾 ベクトル保存中...")
-    save_vector_store(chunked_docs, FAISS_DB_DIR)
-
 if __name__ == "__main__":
-    process_and_save()
+    process_and_save_with_ocr()
