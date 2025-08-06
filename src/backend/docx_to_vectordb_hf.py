@@ -7,6 +7,9 @@ from langchain_core.documents import Document as LangchainDocument
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from tqdm import tqdm
+import fitz  # PyMuPDF
+from pdf2image import convert_from_path
+import pytesseract
 
 # ============================
 # .env 読み込み
@@ -17,7 +20,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 # ============================
 # 切り替え可能な埋め込みモデル
 # ============================
-USE_OPENAI = False  # ← OpenAI Embedding を使うかどうか
+USE_OPENAI = True  # ← OpenAI Embedding を使うかどうか
 
 if USE_OPENAI:
     from langchain_openai import OpenAIEmbeddings
@@ -37,6 +40,7 @@ else:
 # パス設定
 # ============================
 DOCX_DIR = Path("data/docx")
+PDF_DIR = Path("data/pdf")
 TXT_DIR = Path("data/all")
 if USE_OPENAI:
     FAISS_DB_DIR = Path("vectorstore")
@@ -59,6 +63,50 @@ def convert_docx_directory(docx_dir: Path, txt_output_dir: Path):
             print(f"✅ 変換: {docx_file.name}")
         except Exception as e:
             print(f"❌ エラー: {docx_file.name} - {e}")
+
+# ============================
+# PDF → TXT 変換関数
+# ============================
+def convert_pdf_directory(pdf_dir: Path, txt_output_dir: Path, use_ocr=False):
+    txt_output_dir.mkdir(parents=True, exist_ok=True)
+    for pdf_file in pdf_dir.glob("*.pdf"):
+        txt_file = txt_output_dir / f"{pdf_file.stem}.txt"
+        if txt_file.exists():
+            print(f"⏭️ スキップ: {txt_file.name}")
+            continue
+        try:
+            if use_ocr:
+                text = extract_text_from_scanned_pdf(pdf_file)
+            else:
+                text = extract_text_from_pdf(pdf_file)
+
+            if text.strip():
+                txt_file.write_text(text, encoding="utf-8")
+                print(f"✅ 変換: {pdf_file.name}")
+        except Exception as e:
+            print(f"❌ PDF処理失敗: {pdf_file.name} - {e}")
+
+def extract_text_from_pdf(pdf_path: Path) -> str:
+    """テキスト埋め込み型PDFから抽出"""
+    try:
+        doc = fitz.open(pdf_path)
+        return "\n".join(page.get_text() for page in doc)
+    except Exception as e:
+        print(f"❌ PDF読み取り失敗: {pdf_path.name} - {e}")
+        return ""
+
+def extract_text_from_scanned_pdf(pdf_path: Path) -> str:
+    """OCRでスキャンPDFから抽出"""
+    try:
+        images = convert_from_path(str(pdf_path))
+        text = ""
+        for i, image in enumerate(images):
+            text += pytesseract.image_to_string(image, lang="jpn") + "\n"
+        return text
+    except Exception as e:
+        print(f"❌ OCR失敗: {pdf_path.name} - {e}")
+        return ""
+
 
 # ============================
 # TXT → LangchainDocument 読み込み
@@ -133,6 +181,9 @@ def save_vector_store(docs: List[LangchainDocument], output_dir: Path, batch_siz
 def process_and_save():
     print(f"📂 DOCX → TXT 変換: {DOCX_DIR.resolve()}")
     convert_docx_directory(DOCX_DIR, TXT_DIR)
+    
+    print(f"📂 PDF → TXT 変換: {PDF_DIR.resolve()}")
+    convert_pdf_directory(PDF_DIR, TXT_DIR, use_ocr=False)  # or True if OCRが必要
 
     print(f"📁 TXT読込: {TXT_DIR.resolve()}")
     docs = load_txt_directory(TXT_DIR)
